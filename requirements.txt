@@ -1,0 +1,10 @@
+#
+############# Requirements for stl2scad #############
+#
+# NOTE: The current version of stl2scad can be run using either python2 or
+#   python3.  Requirements need to reflect that, so that that a usable version
+#   will be installed in either case.
+# Python 2.7.12 ¦ Python 3.5.1
+#
+###### Requirements without Version Specifiers ######
+numpy-stl
