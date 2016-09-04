@@ -3,6 +3,16 @@
 Initial reference information
 * https://github.com/joshuaflanagan/stl2scad
 
+## definitions
+¦ terms ¦ meanings ¦ acronyms ¦ backronyms ¦ alias ¦
+* stl
+  * STereoLithography
+  * backronyms
+    * Standard Triangle Language
+    * Standard Tessellation Language
+  * surface geometry of a 3D object
+
+
 ## data file format
 * ascii stl http://www.fabbers.com/tech/STL_Format#Sct_ASCII
 * binary stl http://www.fabbers.com/tech/STL_Format#Sct_binary
