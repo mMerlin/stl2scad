@@ -3,6 +3,10 @@
 Initial reference information
 * https://github.com/joshuaflanagan/stl2scad
 
+## sample calls
+
+python stl2scad -i$'\t' file.stl
+
 ## definitions
 ¦ terms ¦ meanings ¦ acronyms ¦ backronyms ¦ alias ¦
 * stl

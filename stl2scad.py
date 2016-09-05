@@ -37,9 +37,18 @@ isV3 = ( sys.hexversion >= 0x030000F0 ) # running with python3 or later
 # regular globals: might be better implemented as singleton
 # objectSequence = 0
 cmdLineArgs = None # command line line argument information used throughout
+cfg = {}
 
 
-def getCmdLineArgs():
+"""getCmdLineArgs ()
+
+Collect information from command line arguments
+
+# TODO add verbose descriptions of the purpose and usage of the flags and options
+@outputs global cmdLineArgs
+"""
+def getCmdLineArgs ():
+    global cmdLineArgs # The only place this is modified in any function
     parser = argparse.ArgumentParser (
         prog = 'stl2scad',
         description = 'Convert .stl format file to OpenSCAD script' )
@@ -52,9 +61,19 @@ def getCmdLineArgs():
         type = argparse.FileType ( 'r' ),
         # action = 'append',
         help = 'The .stl file(s) to process' )
+    # can not figure out how to tell parse to (also) accept -C without any
+    # argument after it. "-C", "-C2014.03" should be treated the same
     parser.add_argument ( '-C', '--scad-version',
-        choices = [ '2014.03', 'current'], default = 'current',
+        # const = '2014.03',
+        # nargs = '?',
+        choices = [ '2014.03', 'current'],
+        # type = str,
+        default = 'current',
         help = 'OpenSCAD compatibility version (default: current)' )
+    parser.add_argument ( '-i', '--indent',
+        default = '\t',
+        help = 'string to use for each level of indenting' )
+    # TODO add (many) more arguments
 # -V, --verbose
 # single scad object per 'solid' ¦ one object per disjoint face set ¦ other for voids
 # object name
@@ -68,23 +87,91 @@ def getCmdLineArgs():
 # optional positional arguments, so specify on per file bases
 #  --opt v1 file1 --opt v2 file2
 # global sequence numbering
-    return parser.parse_args()
+
+    # save the collected information to a global structure
+    cmdLineArgs = parser.parse_args()
+    # print ( cmdLineArgs ) # DEBUG
 # end getCmdLineArgs (…)
 
 
-"""mesh2scad( msh )
+"""def initialize ()
+
+Initialize processing based on the provided command line arguments
+
+@outputs global cfg values
+"""
+def initialize ():
+    global cfg # The only place this is modified in any function
+
+    # Create some configuration values one time that will (or at least could)
+    # get reused
+
+    # format string to use to build a .scad module file
+    cfg [ 'moduleFormat'] = (
+        'module {lMark}name{rMark}() {lMark}{lMark}\n'
+        '{indent1}polyhedron(\n'
+        '{indent2}points=[\n{indent3}{lMark}pts{rMark}\n{indent2}],\n'
+        '{indent2}{compat}=[\n{indent3}{lMark}faces{rMark}\n{indent2}]\n'
+        '{indent1});\n'
+        '{rMark}{rMark}\n\n'
+        '{lMark}name{rMark}();\n'.format (
+            lMark = '{',
+            rMark = '}',
+            indent1 = cmdLineArgs.indent * 1,
+            indent2 = cmdLineArgs.indent * 2,
+            indent3 = cmdLineArgs.indent * 3,
+            compat = 'triangles' if cmdLineArgs.scad_version == '2014.03' else 'faces'
+        ))
+    # string to use to join a set of vectors for output to a .scad file
+    cfg [ 'dataJoin' ] = ',\n{indent3}'.format ( indent3 = cmdLineArgs.indent * 3 )
+    # print ( 'moduleFormat:\n%s' % cfg [ 'moduleFormat'] ) # DEBUG
+    # print ( 'datajoin: "%s"' % cfg [ 'dataJoin' ] ) # DEBUG
+# end initialize (…)
+
+
+"""mesh2scadTrivial ( msh )
 
 Create .scad 3d model from a stored stl mesh
 
+Trivial conversion: vertex to point, facet to face, with no changes
+
 @param msh - model mesh structure from numpy-stl
-@outputs one or more scad models
+@outputs scad model
 """
-def mesh2scad ( msh ):
-    # the 'trivial' keep all duplicate points
+def mesh2scadTrivial ( msh ):
     pts = np.reshape ( msh.vectors, ( -1, 3 )) # change shape( facets, 3, 3 ) to ( facets * 3, 3 )
     fcs = np.reshape ( np.arange ( 0, len ( pts )), ( -1, 3 )) # straight start to finish point sequence
     return { 'points': pts, 'faces': fcs, 'name': msh.name }
-# end mesh2scad (…)
+# end mesh2scadTrivial (…)
+
+
+"""mesh2scadDedup ( msh )
+
+Create .scad 3d model from a stored stl mesh
+
+De-duplicated conversion: matching facet to faces, but with only unique points
+from vertices
+
+@param msh - model mesh structure from numpy-stl
+@outputs scad model
+"""
+def mesh2scadDedup ( msh ):
+    # http://docs.scipy.org/doc/numpy/reference/generated/numpy.unique.html
+    # np.unique works with a 1d (flatten) array.
+    # # change shape( facets, 3, 3 ) to ( facets * 3, 3 )
+    # pts0 = np.reshape ( msh.vectors, ( -1, 3 ))
+    # # change shape( facets * 3, 3 ) to ( facets * 3 ) of strings
+    # pts1 = [ point2str ( pt ) for pt in pts0 ]
+
+    # change shape( facets, 3, 3 ) to ( facets * 3 ) of strings
+    pts1 = [ point2str ( pt ) for pt in np.reshape ( msh.vectors, ( -1, 3 )) ]
+
+    # pts = unique entries from msh.vectors
+    # fcs0 = for each msh.vectors entry, index in pts
+    pts, fcs0 = np.unique ( pts1, return_inverse = True )
+    fcs = np.reshape ( fcs0, ( -1, 3 )) # straight vectors lookup to groups of face points
+    return { 'points': pts, 'faces': fcs, 'name': msh.name }
+# end mesh2scadDedup (…)
 
 
 """model2File ( )
@@ -103,21 +190,10 @@ def model2File ( scadModel, oSpec, seq ):
         # return? raise?
         print ( 'failed to open file to save OpenSCAD module to: "%s"' % oSpec )
         return False
-    oFile.write ( 'module %s() {\n' % scadModel [ 'name' ] )
-    oFile.write ( '\tpolyhedron(\n' )
-    oFile.write ( '\t\tpoints=[\n\t\t\t' )
-    # That join seems rather convoluted for the result.  It *works* but…
-    # oFile.write ( ",\n\t\t\t".join ([ str(pt) for pt in scadModel [ 'points' ].tolist ()]))
-    # Convert numpy array to python list; convert each (point) element in that
-    # list to a string; join the strings with comma separators and whitespace
-    oFile.write ( ",\n\t\t\t".join ([ point2str ( pt ) for pt in scadModel [ 'points' ].tolist ()]))
-    oFile.write ( '\n\t\t],\n' ) # end of points
-    oFile.write ( '\t\t%s=[\n\t\t\t' % 'faces' ) # 'triangles' for compatibility
-    oFile.write ( ",\n\t\t\t".join ([ str(pt) for pt in scadModel [ 'faces' ].tolist ()]))
-    oFile.write ( '\n\t\t]\n' ) # end of faces
-    oFile.write ( '\t);\n' ) # end of polyhedron
-    oFile.write ( '}\n' ) # end of module
-    oFile.write ( '\n%s();\n' % scadModel [ 'name' ] )
+    oFile.write ( cfg [ 'moduleFormat' ].format (
+            name  = scadModel [ 'name' ],
+            pts   = cfg [ 'dataJoin' ].join ( scadModel [ 'points' ]), # points already converted to strings
+            faces = cfg [ 'dataJoin' ].join ([ point2str ( pt ) for pt in scadModel [ 'faces' ]])))
     oFile.close()
     return True
 # end model2File (…)
@@ -243,11 +319,12 @@ def getBaseModuleName ( solName, stlName ):
 
 
 def main ():
-    cmdLineArgs = getCmdLineArgs()
+    getCmdLineArgs()
+    initialize ()
     # if ( cmdLineArgs.verbosity > 0 ):
     #     print ( '\nstl2scad converter version %s' % STL2SCAD_VERSION )
     for f in cmdLineArgs.file:
-    #     print ( '\nnew file: |%s|' % f.name ) # DEBUG
+        # print ( '\nnew file: |%s|' % f.name ) # DEBUG
         stlPath, stlFile = os.path.split ( f.name )
         try:
             stlMesh = mesh.Mesh.from_file( f.name )
@@ -272,7 +349,8 @@ def main ():
         stlMesh.name = stlMesh.name.decode( "ascii" ) # byte array to string object
 
         mName = getBaseModuleName( stlMesh.name, stlFile )
-        scadModel = mesh2scad ( stlMesh )
+        # scadModel = mesh2scadTrivial ( stlMesh )
+        scadModel = mesh2scadDedup ( stlMesh )
         modelSequence = None # TODO get sequence number from scadModel, itterate over models
         oSpec = fullScadFileSpec ( modelSequence, stlMesh.name, mName, stlPath, stlFile )
         if ( model2File ( scadModel, oSpec, modelSequence )):
@@ -288,17 +366,7 @@ def filePathInfo ( fh ):
     # https://docs.python.org/3/library/pathlib.html
     print ( 'fileno: %d' % fh.fileno ())
     print ( 'os.stat_float_times: %s' % os.stat_float_times ())
-    if ( isV3 ):
-        print ( 'os.stat:', os.stat ( fh.name ))
-    else:
-        print ( 'os.stat: %s' % os.stat ( fh.name ))
-    if ( isV3 ):
-        # adds extra outer bracket with python2
-        print ( 'os.stat:', os.stat ( fh.name ))
-    else:
-        # TypeError: not all arguments converted during string formatting python3
-        print ( 'os.stat: %s' % os.stat ( fh.name ))
-    # print ( os.stat ( fh ))
+    print ( 'os.stat: %s' % ( os.stat ( fh.name ), ))
     # os.path # https://docs.python.org/2.7/library/os.path.html
 # end filePathInfo (…)
 
