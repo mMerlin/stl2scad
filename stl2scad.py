@@ -28,7 +28,7 @@ from stl import mesh
 
 # Pseudo constants: some would be better as enums, but backward compatibility …
 # IDEA import enum for python2
-STL2SCAD_VERSION = '0.0.1'
+STL2SCAD_VERSION = '0.0.2'
 # This version matches the functionality of
 # https://github.com/joshuaflanagan/stl2scad, though the output coordinate
 # precission is different for some cases
@@ -38,95 +38,6 @@ isV3 = ( sys.hexversion >= 0x030000F0 ) # running with python3 or later
 # objectSequence = 0
 cmdLineArgs = None # command line line argument information used throughout
 cfg = {}
-
-
-"""getCmdLineArgs ()
-
-Collect information from command line arguments
-
-# TODO add verbose descriptions of the purpose and usage of the flags and options
-@outputs global cmdLineArgs
-"""
-def getCmdLineArgs ():
-    global cmdLineArgs # The only place this is modified in any function
-    parser = argparse.ArgumentParser (
-        prog = 'stl2scad',
-        description = 'Convert .stl format file to OpenSCAD script' )
-    parser.add_argument ( '-v', '--version', action = 'version',
-        # version = '%(prog)s %s' STL2SCAD_VERSION )
-        # version = '%(prog)s $STL2SCAD_VERSION' )
-        version = '%(prog)s 0.0.1' )
-    parser.add_argument ( 'file', default = sys.stdin,
-        nargs = '*',
-        type = argparse.FileType ( 'r' ),
-        # action = 'append',
-        help = 'The .stl file(s) to process' )
-    # can not figure out how to tell parse to (also) accept -C without any
-    # argument after it. "-C", "-C2014.03" should be treated the same
-    parser.add_argument ( '-C', '--scad-version',
-        # const = '2014.03',
-        # nargs = '?',
-        choices = [ '2014.03', 'current'],
-        # type = str,
-        default = 'current',
-        help = 'OpenSCAD compatibility version (default: current)' )
-    parser.add_argument ( '-i', '--indent',
-        default = '\t',
-        help = 'string to use for each level of indenting' )
-    # TODO add (many) more arguments
-# -V, --verbose
-# single scad object per 'solid' ¦ one object per disjoint face set ¦ other for voids
-# object name
-# object name prefix
-# destination folder (versus back where source file found)
-# overwrite existing ¦ increment sequence
-# .scad from input file
-# .scad from solid objectname
-# .scad from input
-# [no]warn overwrite output
-# optional positional arguments, so specify on per file bases
-#  --opt v1 file1 --opt v2 file2
-# global sequence numbering
-
-    # save the collected information to a global structure
-    cmdLineArgs = parser.parse_args()
-    # print ( cmdLineArgs ) # DEBUG
-# end getCmdLineArgs (…)
-
-
-"""def initialize ()
-
-Initialize processing based on the provided command line arguments
-
-@outputs global cfg values
-"""
-def initialize ():
-    global cfg # The only place this is modified in any function
-
-    # Create some configuration values one time that will (or at least could)
-    # get reused
-
-    # format string to use to build a .scad module file
-    cfg [ 'moduleFormat'] = (
-        'module {lMark}name{rMark}() {lMark}{lMark}\n'
-        '{indent1}polyhedron(\n'
-        '{indent2}points=[\n{indent3}{lMark}pts{rMark}\n{indent2}],\n'
-        '{indent2}{compat}=[\n{indent3}{lMark}faces{rMark}\n{indent2}]\n'
-        '{indent1});\n'
-        '{rMark}{rMark}\n\n'
-        '{lMark}name{rMark}();\n'.format (
-            lMark = '{',
-            rMark = '}',
-            indent1 = cmdLineArgs.indent * 1,
-            indent2 = cmdLineArgs.indent * 2,
-            indent3 = cmdLineArgs.indent * 3,
-            compat = 'triangles' if cmdLineArgs.scad_version == '2014.03' else 'faces'
-        ))
-    # string to use to join a set of vectors for output to a .scad file
-    cfg [ 'dataJoin' ] = ',\n{indent3}'.format ( indent3 = cmdLineArgs.indent * 3 )
-    # print ( 'moduleFormat:\n%s' % cfg [ 'moduleFormat'] ) # DEBUG
-    # print ( 'datajoin: "%s"' % cfg [ 'dataJoin' ] ) # DEBUG
-# end initialize (…)
 
 
 """mesh2scadTrivial ( msh )
@@ -216,7 +127,7 @@ def point2str( pnt ):
 
 generate the full path and file specification for an output .scad module
 
-@global cmdLineArgs - parsed command line arguments
+@inputs global cmdLineArgs - parsed command line arguments
 
 @param seq - sequence number of model within sub-assembly: None when complete model
 @param solName - the name of the solid loaded from the stl file
@@ -294,13 +205,14 @@ Sources of information to use:
 - the solid name from the STL file
 - the (base) name of the input STL file
 
-@global cmdLineArgs - parsed command line arguments
+@inputs global cmdLineArgs - parsed command line arguments
 
 @param solName - the name of the solid loaded from the stl file
 @param stlName - the name (without path) of the input stl file
 @returns string with desired (base) scad module name
 """
 def getBaseModuleName ( solName, stlName ):
+    # TODO handle --module
     if ( len ( solName ) > 1 ):
         baseModule = solName
     else:
@@ -318,55 +230,185 @@ def getBaseModuleName ( solName, stlName ):
 # end getBaseModuleName (…)
 
 
+"""processStlFile ( fh )
+
+process a single input stl file
+
+@inputs global cmdLineArgs - parsed command line arguments
+
+@param fh - handle for stl file
+@outputs converted .scad file(s)
+"""
+def processStlFile ( fh ):
+    if ( cmdLineArgs.verbose ):
+        filePathInfo ( fh )
+    stlMesh = getMesh ( fh.name )
+    stlPath, stlFile = os.path.split ( fh.name )
+    fh.close() # done with the stl file opened via command line arguments
+
+    if ( stlMesh == None ):
+        return
+    # meshInfo = getMeshInfo () # bounding box
+    if ( cmdLineArgs.verbose ):
+        # showMeshInfo( stlMesh, meshInfo )
+        showMeshInfo( stlMesh )
+
+    # convert from byte array to string object.  Could use utf-8 here, but
+    # given the general feel of the stl file format specification, I think
+    # ascii is more appropriate
+    stlMesh.name = stlMesh.name.decode( "ascii" ) # byte array to string object
+
+    # TODO handle --mode «conversion_mode»
+    # «raw¦dedup¦split¦simplify¦«?other?»»
+    # scadModel = mesh2scadTrivial ( stlMesh )
+    scadModel = mesh2scadDedup ( stlMesh )
+    modelSequence = None # TODO get sequence number from scadModel, itterate over models
+    mName = getBaseModuleName( stlMesh.name, stlFile )
+    oSpec = fullScadFileSpec ( modelSequence, stlMesh.name, mName, stlPath, stlFile )
+    if ( model2File ( scadModel, oSpec, modelSequence )):
+        # handle --quiet
+        print ( '%s ==> %s' % ( os.path.join ( stlPath, stlFile ), oSpec ))
+# end processStlFile (…)
+
+
 def main ():
     getCmdLineArgs()
     initialize ()
-    # if ( cmdLineArgs.verbosity > 0 ):
-    #     print ( '\nstl2scad converter version %s' % STL2SCAD_VERSION )
+    if ( cmdLineArgs.verbose ):
+        print ( '\nstl2scad converter version %s' % STL2SCAD_VERSION )
     for f in cmdLineArgs.file:
-        # print ( '\nnew file: |%s|' % f.name ) # DEBUG
-        stlPath, stlFile = os.path.split ( f.name )
-        try:
-            stlMesh = mesh.Mesh.from_file( f.name )
-        except AssertionError: # error cases explicitly checked for by the library code
-            t, v, tb = sys.exc_info()
-            print ( '\n|%s| is probably not a (valid) STL file.\nLibrary refused to load it. Details:\n  %s\n'
-                % ( f.name, v ))
-            # print ( 'exception: %s\ntraceback: %s' % ( t, tb )) # DEBUG
-            # print ( sys.excepthook ( t, v, tb )) # DEBUG
-            stlMesh = None
-        except: # catchall
-            print ( '\n\nFailed to load %s as STL file' % f.name )
-            print ( sys.exc_info() )
-            stlMesh = None
-        # filePathInfo ( f )
-        f.close() # done with the stl file opened via command line arguments
-        # showMeshInfo( stlMesh )
-
-        # convert from byte array to string object.  Could use utf-8 here, but
-        # given the general feel of the stl file format specification, I think
-        # ascii is more appropriate
-        stlMesh.name = stlMesh.name.decode( "ascii" ) # byte array to string object
-
-        mName = getBaseModuleName( stlMesh.name, stlFile )
-        # scadModel = mesh2scadTrivial ( stlMesh )
-        scadModel = mesh2scadDedup ( stlMesh )
-        modelSequence = None # TODO get sequence number from scadModel, itterate over models
-        oSpec = fullScadFileSpec ( modelSequence, stlMesh.name, mName, stlPath, stlFile )
-        if ( model2File ( scadModel, oSpec, modelSequence )):
-            print ( '%s ==> %s' % ( os.path.join ( stlPath, stlFile ), oSpec ))
+        # print ( '\nnew file: |%s|' % f.name ) # DEBUG TRACE
+        processStlFile ( f )
 # end main (…)
+
+
+"""getCmdLineArgs ()
+
+Collect information from command line arguments
+
+# TODO add verbose descriptions of the purpose and usage of the flags and options
+@outputs global cmdLineArgs
+"""
+def getCmdLineArgs ():
+    global cmdLineArgs # The only place this is modified in any function
+    parser = argparse.ArgumentParser (
+        prog = 'stl2scad',
+        description = 'Convert .stl format file to OpenSCAD script' )
+    parser.add_argument ( '-v', '--version', action = 'version',
+        version = '%(prog)s {ver}'.format ( ver = STL2SCAD_VERSION ))
+    parser.add_argument ( 'file', default = sys.stdin,
+        nargs = '*',
+        type = argparse.FileType ( 'r' ),
+        # action = 'append',
+        help = 'The .stl file(s) to process' )
+    # can not figure out how to tell parse to (also) accept -C without any
+    # argument after it. "-C", "-C2014.03" should be treated the same
+    parser.add_argument ( '-C', '--scad-version',
+        # const = '2014.03',
+        # nargs = '?',
+        choices = [ '2014.03', 'current'],
+        # type = str,
+        default = 'current',
+        help = 'OpenSCAD compatibility version (default: current)' )
+    parser.add_argument ( '-i', '--indent',
+        default = '\t',
+        help = 'line prefix string to use for each level of nested indenting' )
+    parser.add_argument ( '-V', '--verbose',
+        # IDEA TODO change to numeric verbosity; change to count instances
+        # nargs = 0,
+        action = 'store_true',
+        help = 'show verbose output' )
+
+    # TODO add (many) more arguments
+# single scad object per 'solid' ¦ one object per disjoint face set ¦ other for voids
+# object name
+# object name prefix
+# destination folder (versus back where source file found)
+# overwrite existing ¦ increment sequence
+# .scad from input file
+# .scad from solid objectname
+# .scad from input
+# [no]warn overwrite output
+# optional positional arguments, so specify on per file bases
+#  --opt v1 file1 --opt v2 file2
+# global sequence numbering
+
+    # save the collected information to a global structure
+    cmdLineArgs = parser.parse_args()
+    print ( cmdLineArgs ) # DEBUG
+# end getCmdLineArgs (…)
+
+
+"""def initialize ()
+
+Initialize processing based on the provided command line arguments
+
+@inputs global cmdLineArgs
+@outputs global cfg
+"""
+def initialize ():
+    global cfg # The only place this is modified in any function
+
+    # Create some configuration values one time that will (or at least could)
+    # get reused
+
+    # format string to use to build a .scad module file
+    cfg [ 'moduleFormat'] = (
+        'module {lMark}name{rMark}() {lMark}{lMark}\n'
+        '{indent1}polyhedron(\n'
+        '{indent2}points=[\n{indent3}{lMark}pts{rMark}\n{indent2}],\n'
+        '{indent2}{compat}=[\n{indent3}{lMark}faces{rMark}\n{indent2}]\n'
+        '{indent1});\n'
+        '{rMark}{rMark}\n\n'
+        '{lMark}name{rMark}();\n'.format (
+            lMark = '{',
+            rMark = '}',
+            indent1 = cmdLineArgs.indent * 1,
+            indent2 = cmdLineArgs.indent * 2,
+            indent3 = cmdLineArgs.indent * 3,
+            compat = 'triangles' if cmdLineArgs.scad_version == '2014.03' else 'faces'
+        ))
+    # string to use to join a set of vectors for output to a .scad file
+    cfg [ 'dataJoin' ] = ',\n{indent3}'.format ( indent3 = cmdLineArgs.indent * 3 )
+    # print ( 'moduleFormat:\n%s' % cfg [ 'moduleFormat'] ) # DEBUG
+    # print ( 'datajoin: "%s"' % cfg [ 'dataJoin' ] ) # DEBUG
+# end initialize (…)
+
+
+"""getMesh ( fileSpec )
+
+Load an (ascii or binary) stl file to a mesh structure
+
+@param fileSpec - full file path specification for stl file to load
+@returns numpy-stl mesh.Mesh.from_file or None
+"""
+def getMesh ( fileSpec ):
+    stlMesh = None
+    try:
+        stlMesh = mesh.Mesh.from_file( fileSpec )
+    except AssertionError: # error cases explicitly checked for by the library code
+        t, v, tb = sys.exc_info()
+        print ( '\n|%s| is probably not a (valid) STL file.\nLibrary refused to load it. Details:\n  %s\n'
+            % ( fileSpec, v ))
+        # File too large, triangles which exceeds the maximum of 100000000
+        # probably means start of file not recognized as stl solid name, so
+        # attempted to load as binary stl, but was really an ascii file.
+    except: # catchall
+        print ( '\n\nFailed to load %s as STL file' % fileSpec )
+        print ( sys.exc_info ())
+    return stlMesh
+# end getMesh (…)
 
 
 def filePathInfo ( fh ):
     # keep (part) arround for --verbose
     print ( 'fh.name = "%s"' % fh.name )
-    print ( os.statvfs ( fh.name ))
+    # print ( os.statvfs ( fh.name ))
     # p = Path ( '.' ) # v3.4
     # https://docs.python.org/3/library/pathlib.html
     print ( 'fileno: %d' % fh.fileno ())
-    print ( 'os.stat_float_times: %s' % os.stat_float_times ())
-    print ( 'os.stat: %s' % ( os.stat ( fh.name ), ))
+    # print ( 'os.stat_float_times: %s' % os.stat_float_times ())
+    # print ( 'os.stat: %s' % ( os.stat ( fh.name ), ))
     # os.path # https://docs.python.org/2.7/library/os.path.html
 # end filePathInfo (…)
 
@@ -411,15 +453,22 @@ msh.speedups - boolean ?internal? flag used during load attempts, switching
   between ascii and binary
 """
 def showMeshInfo( msh ):
-    # Keep around to use for --verbose
     vol, cog, inertia = msh.get_mass_properties()
-    print( "Volume                                  = {0}".format(vol))
-    print( "Position of the center of gravity (COG) = {0}".format(cog))
-    print( "Inertia matrix at expressed at the COG  = {0}".format(inertia[0,:]))
-    print( "                                          {0}".format(inertia[1,:]))
-    print( "                                          {0}".format(inertia[2,:]))
+    print ( '\nSTL Mesh properties:\n' )
+    print ( 'Name = "{0}"'.format ( msh.name ))
+    print ( 'Volume = {0}'.format ( vol ))
+    print ( 'Facets: %d' % len ( msh ))
+    print ( 'Position of the center of gravity (COG):\n{0}'.format ( cog ))
+    print ( 'Inertia matrix expressed at the COG:\n{0}'.format ( inertia ))
 
-    print ( 'msh Len: %d' % len ( msh )) # 12
+    # print ( msh.x.shape ) # DEBUG
+    boundingBox = np.array ([
+        [ min ( np.reshape ( msh.x, -1 )), min ( np.reshape ( msh.y, -1 )), min ( np.reshape ( msh.z, -1 ))],
+        [ max ( np.reshape ( msh.x, -1 )), max ( np.reshape ( msh.y, -1 )), max ( np.reshape ( msh.z, -1 ))]])
+    print ( 'Bounding Box:\n{0}'.format( boundingBox ))
+    if ( min ( boundingBox [ 0 ]) <= 0 ):
+        print ( '\nNOTE: Not a standard STL source file;\n'
+            '  not all points are in the positive quadrant\n' )
 #end showMeshInfo (…)
 
 
