@@ -40,72 +40,88 @@ cmdLineArgs = None # command line line argument information used throughout
 cfg = {}
 
 
-"""mesh2scadTrivial ( msh )
+"""mesh2scadTrivial ( mdl, msh )
 
-Create .scad 3d model from a stored stl mesh
+Populate .scad 3d model from a stored stl mesh
 
 Trivial conversion: vertex to point, facet to face, with no changes
 
-@param msh - model mesh structure from numpy-stl
-@outputs scad model
+@param mdl - the 3d scad model to update
+@param msh - the stl mesh (numpy-stl) to get update information from
+@outputs updated mdl
 """
-def mesh2scadTrivial ( msh ):
+def mesh2scadTrivial ( mdl, msh ):
     pts = np.reshape ( msh.vectors, ( -1, 3 )) # change shape( facets, 3, 3 ) to ( facets * 3, 3 )
-    fcs = np.reshape ( np.arange ( 0, len ( pts )), ( -1, 3 )) # straight start to finish point sequence
-    return { 'points': pts, 'faces': fcs, 'name': msh.name }
+    facePoints = np.reshape ( np.arange ( 0, len ( pts )), ( -1, 3 )) # straight start to finish point sequence
+    mdl [ 'objects' ].append ({ 'points': pts, 'faces': facePoints })
 # end mesh2scadTrivial (…)
 
 
-"""mesh2scadDedup ( msh )
+"""mesh2scadDedup  ( mdl, msh )
 
-Create .scad 3d model from a stored stl mesh
+Populate .scad 3d model from a stored stl mesh
 
 De-duplicated conversion: matching facet to faces, but with only unique points
 from vertices
 
-@param msh - model mesh structure from numpy-stl
-@outputs scad model
+@param mdl - the 3d scad model to update
+@param msh - the stl mesh (numpy-stl) to get update information from
+@outputs updated mdl
 """
-def mesh2scadDedup ( msh ):
+def mesh2scadDedup ( mdl, msh ):
     # http://docs.scipy.org/doc/numpy/reference/generated/numpy.unique.html
     # np.unique works with a 1d (flatten) array.
-    # # change shape( facets, 3, 3 ) to ( facets * 3, 3 )
-    # pts0 = np.reshape ( msh.vectors, ( -1, 3 ))
-    # # change shape( facets * 3, 3 ) to ( facets * 3 ) of strings
-    # pts1 = [ point2str ( pt ) for pt in pts0 ]
 
-    # change shape( facets, 3, 3 ) to ( facets * 3 ) of strings
-    pts1 = [ point2str ( pt ) for pt in np.reshape ( msh.vectors, ( -1, 3 )) ]
+    # change shape( facets, 3, 3 ) to ( facets * 3, 3 ) of float coordinates
+    ptVectors = np.reshape ( msh.vectors, ( -1, 3 ))
+    # change shape( facets * 3, 3 ) to ( facets * 3, 1 ) of stringified vectors
+    ptStrings = [ point2str ( pt ) for pt in  ptVectors ]
 
-    # pts = unique entries from msh.vectors
-    # fcs0 = for each msh.vectors entry, index in pts
-    pts, fcs0 = np.unique ( pts1, return_inverse = True )
-    fcs = np.reshape ( fcs0, ( -1, 3 )) # straight vectors lookup to groups of face points
-    return { 'points': pts, 'faces': fcs, 'name': msh.name }
+    # unqStrings = unique vector string representations from ptStrings
+    # idx = indicies into ptStrings that gave entries in unqStrings
+    # facePoints = for each ptString entry, index in unqStrings
+    unqStrings, idx, facePoints = np.unique ( ptStrings, return_index = True, return_inverse = True )
+
+    mdl [ 'objects' ].append ({
+        'points': [ ptVectors [ i ] for i in idx ] , # Get numeric version of vectors back
+        'faces': np.reshape ( facePoints, ( -1, 3 )) }) # straight vectors lookup to groups of face points
 # end mesh2scadDedup (…)
 
 
-"""model2File ( )
+"""model2File ( mdl )
 
 Save 3d model to scad file
 
-@param scadModel - OpenSCAD description of 3d object model
-
-@param fNmPieces - tupple of string pieces to use to create .scad save file name
-# TODO generate the file name before calling, and pass only the file specification
-@param seq - sequence number of model within sub-assembly: None when complete model
+@param mdl - description of 3d OpenScad model
 """
-def model2File ( scadModel, oSpec, seq ):
-    oFile = initScadFile ( oSpec )
-    if ( oFile == None ):
-        # return? raise?
-        print ( 'failed to open file to save OpenSCAD module to: "%s"' % oSpec )
-        return False
-    oFile.write ( cfg [ 'moduleFormat' ].format (
-            name  = scadModel [ 'name' ],
-            pts   = cfg [ 'dataJoin' ].join ( scadModel [ 'points' ]), # points already converted to strings
-            faces = cfg [ 'dataJoin' ].join ([ point2str ( pt ) for pt in scadModel [ 'faces' ]])))
-    oFile.close()
+def model2File ( mdl ):
+    objCnt = len ( mdl [ 'objects' ])
+    objSeq = '' if objCnt < 2 else 0
+    # print ( 'model2File: {0} objects; starting sequence: {1}'
+    #     ''.format ( objCnt, objSeq )) # DEBUG
+    for obj in mdl [ 'objects' ]:
+        if ( objSeq == '' ):
+            mName = mdl [ 'model' ]
+        else:
+            objSeq += 1
+            mName = '{0}{1:03d}'.format ( mdl [ 'model' ], objSeq)
+        # print ( 'module: "{0}"'.format ( mName )) # DEBUG
+
+        oFile = initScadFile ( mdl, objSeq )
+        if ( oFile == None ):
+            # return? raise?
+            print ( 'failed to create OpenSCAD module save file' )
+            return False # IDEA continue, but set failure flag
+        oFile.write ( cfg [ 'moduleFormat' ].format (
+                name  = mName,
+                # pts   = cfg [ 'dataJoin' ].join ( obj [ 'points' ]), # points already converted to strings
+                pts   = cfg [ 'dataJoin' ].join ([ point2str ( pt ) for pt in obj [ 'points' ]]),
+                faces = cfg [ 'dataJoin' ].join ([ point2str ( pt ) for pt in obj [ 'faces' ]])))
+        oFile.close()
+        # TODO handle --quiet
+        print ( '{0} ==> {1}'.format (
+            os.path.join ( mdl [ 'stlPath' ], mdl [ 'stlFile' ]),
+            oFile.name ))
     return True
 # end model2File (…)
 
@@ -123,27 +139,24 @@ def point2str( pnt ):
 # end point2str(…)
 
 
-"""fullScadFileSpec ( seq, solName, modName, stlName, StlPath )
+"""fullScadFileSpec ( mdl, seq )
 
 generate the full path and file specification for an output .scad module
 
 @inputs global cmdLineArgs - parsed command line arguments
 
-@param seq - sequence number of model within sub-assembly: None when complete model
-@param solName - the name of the solid loaded from the stl file
-@param modName - the module name
-@param stlName - the name (without path) of the input stl file
-@param stlPath - the path to the input stl file
+@param mdl - 3d scad model
+@param seq - object sequence number in the model
 @returns .scad file specification
 """
-def fullScadFileSpec ( seq, solName, modName, stlPath, stlName ):
+def fullScadFileSpec ( mdl, seq ):
     # TODO check cmdLineArgs for rules to append sequence / suffix / prefix to
     #  file name
     # --destination «path» --size «digits» --type «alpha¦decimal¦hex»
     # --separator «string» --prefix «string» --noseparator --seqalways
     # --module «solid¦stl¦quoted»
 
-    if ( seq == None ):
+    if ( seq == '' ):
         # TODO handle --seqalways
         sfx = ''
     else:
@@ -152,23 +165,28 @@ def fullScadFileSpec ( seq, solName, modName, stlPath, stlName ):
         fmt = '%s%%0%dd' % ( '_', 3 )
         sfx = fmt % seq
     # TODO handle --module
-    # fName = '%s%s%s%sscad' ( cmdLineArgs.prefix, solName, sfx, os.path.extsep )
-    fName = '%s%s%s%sscad' % ( '', solName, sfx, os.path.extsep )
-    if ( stlPath == '' ):
+    fName = '%s%s%s%sscad' % (
+        '', # cmdLineArgs.prefix
+        mdl [ 'model' ],
+        sfx,
+        os.path.extsep )
+    if ( mdl [ 'stlPath' ] == '' ):
         return fName
-    # handle --destination
-    return os.path.join ( os.path.relpath ( stlPath ), fName )
+    # TODO handle --destination
+    return os.path.join ( os.path.relpath ( mdl [ 'stlPath' ]), fName )
 # end fullScadFileSpec (…)
 
 
-"""initScadFile ( fileSpec )
+"""initScadFile ( mdl, seq )
 
 open and prepare a file to hold an OpenScad script
 
-@param fileSpec - string with full specification for output file
+@param mdl - 3d scad model
+@param seq - object sequence number in the model
 @returns file handle or None
 """
-def initScadFile ( fullSpec ):
+def initScadFile ( mdl, seq ):
+    fullSpec = fullScadFileSpec ( mdl, seq )
     if ( not isV3 ): # python 2 does not have 'x' mode for file open: check first
         # IDEA TODO check if file exists without attempting to open it : os.stat
         try:
@@ -195,39 +213,36 @@ def initScadFile ( fullSpec ):
 # end initScadFile (…)
 
 
-"""getBaseModuleName ( solName, stlName )
+"""generateModuleName ( mdl )
 
 Determine the name to use as the base for modules generated from the current
 stl file.
 
 Sources of information to use:
 - options from the command line
-- the solid name from the STL file
-- the (base) name of the input STL file
+- information already loaded into the model
 
 @inputs global cmdLineArgs - parsed command line arguments
 
-@param solName - the name of the solid loaded from the stl file
-@param stlName - the name (without path) of the input stl file
-@returns string with desired (base) scad module name
+@param mdl - 3d scad model
+@outputs updated mdl with (base) scad module name
 """
-def getBaseModuleName ( solName, stlName ):
+def generateModuleName ( mdl ):
     # TODO handle --module
-    if ( len ( solName ) > 1 ):
-        baseModule = solName
+    # print ( 'generateModuleName:\n{0}'.format ( mdl )) # DEBUG
+    if ( len ( mdl [ 'solid' ]) > 1 ):
+        mdl [ 'model' ] = mdl [ 'solid' ]
     else:
         # IDEA: with linux, remove (possible) multiple extentions?
-        splitName = os.path.splitext ( stlName )
-        # splitName = stlName.rsplit ( '.', 1 )
-        if ( len ( splitName[0] )> 1 and len ( splitName[1] )< 5 ):
-            baseModule = splitName[0]
+        splitName = os.path.splitext ( mdl [ 'stlFile' ])
+        # TODO replace manifest constants with named cfg values
+        if ( len ( splitName [ 0 ] )> 1 and len ( splitName [ 1 ] )< 5 ):
+            mdl [ 'model' ] = splitName [ 0 ]
         else:
-            baseModule = stlName
-    if ( len ( baseModule ) < 2 ):
-        baseModule = 'stlmodule'
-
-    return baseModule
-# end getBaseModuleName (…)
+            mdl [ 'model' ] = mdl [ 'stlFile' ]
+    if ( len ( mdl [ 'model' ] ) < 2 ):
+        mdl [ 'model' ] = 'stlmodule'
+# end generateModuleName (…)
 
 
 """processStlFile ( fh )
@@ -242,33 +257,42 @@ process a single input stl file
 def processStlFile ( fh ):
     if ( cmdLineArgs.verbose ):
         filePathInfo ( fh )
+    scadModel = newScadModel ( fh.name )
     stlMesh = getMesh ( fh.name )
-    stlPath, stlFile = os.path.split ( fh.name )
-    fh.close() # done with the stl file opened via command line arguments
+    fh.close()
 
     if ( stlMesh == None ):
         return
-    # meshInfo = getMeshInfo () # bounding box
+    scadModel [ 'solid' ] = stlMesh.name.decode( "ascii" )
+    generateModuleName( scadModel )
     if ( cmdLineArgs.verbose ):
-        # showMeshInfo( stlMesh, meshInfo )
         showMeshInfo( stlMesh )
-
-    # convert from byte array to string object.  Could use utf-8 here, but
-    # given the general feel of the stl file format specification, I think
-    # ascii is more appropriate
-    stlMesh.name = stlMesh.name.decode( "ascii" ) # byte array to string object
 
     # TODO handle --mode «conversion_mode»
     # «raw¦dedup¦split¦simplify¦«?other?»»
-    # scadModel = mesh2scadTrivial ( stlMesh )
-    scadModel = mesh2scadDedup ( stlMesh )
-    modelSequence = None # TODO get sequence number from scadModel, itterate over models
-    mName = getBaseModuleName( stlMesh.name, stlFile )
-    oSpec = fullScadFileSpec ( modelSequence, stlMesh.name, mName, stlPath, stlFile )
-    if ( model2File ( scadModel, oSpec, modelSequence )):
-        # handle --quiet
-        print ( '%s ==> %s' % ( os.path.join ( stlPath, stlFile ), oSpec ))
+    # mesh2scadTrivial ( scadModel, stlMesh ) # DEBUG
+    mesh2scadDedup ( scadModel, stlMesh )
+
+    model2File ( scadModel )
 # end processStlFile (…)
+
+
+"""newScadModel ( solid, srcPath, srcFile )
+
+Create and initialize a dictionary to hold object data for a 3D model
+
+@param srcPath - path to folder containing stl file
+@param srcFile - name of stl file, without path
+@returns initialized stl model structure (dictionary)
+"""
+def newScadModel ( srcSpec ):
+    stlPath, stlFile = os.path.split ( srcSpec )
+    return {
+        'stlPath': stlPath,
+        'stlFile': stlFile,
+        'objects': []
+    }
+# end newScadModel (…)
 
 
 def main ():
@@ -335,7 +359,7 @@ def getCmdLineArgs ():
 
     # save the collected information to a global structure
     cmdLineArgs = parser.parse_args()
-    print ( cmdLineArgs ) # DEBUG
+    # print ( cmdLineArgs ) # DEBUG
 # end getCmdLineArgs (…)
 
 
