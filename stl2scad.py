@@ -1,5 +1,5 @@
 #!/usr/bin/python
-# -*- coding: utf-8 -*-
+# coding=utf-8
 
 """ STL to SCAD converter.
 
@@ -25,13 +25,12 @@ import sys
 import argparse
 import numpy as np
 from stl import mesh
+import array
 
 # Pseudo constants: some would be better as enums, but backward compatibility …
 # IDEA import enum for python2
-STL2SCAD_VERSION = '0.0.2'
-# This version matches the functionality of
-# https://github.com/joshuaflanagan/stl2scad, though the output coordinate
-# precission is different for some cases
+# Semantic Versioning 2.0.0 # http://semver.org/
+STL2SCAD_VERSION = '0.0.3'
 isV3 = ( sys.hexversion >= 0x030000F0 ) # running with python3 or later
 
 # regular globals: might be better implemented as singleton
@@ -53,6 +52,7 @@ Trivial conversion: vertex to point, facet to face, with no changes
 def mesh2scadTrivial ( mdl, msh ):
     pts = np.reshape ( msh.vectors, ( -1, 3 )) # change shape( facets, 3, 3 ) to ( facets * 3, 3 )
     facePoints = np.reshape ( np.arange ( 0, len ( pts )), ( -1, 3 )) # straight start to finish point sequence
+    # print ( pts.dtype, facePoints.dtype ) # DEBUG float32, int64
     mdl [ 'objects' ].append ({ 'points': pts, 'faces': facePoints })
 # end mesh2scadTrivial (…)
 
@@ -74,18 +74,280 @@ def mesh2scadDedup ( mdl, msh ):
 
     # change shape( facets, 3, 3 ) to ( facets * 3, 3 ) of float coordinates
     ptVectors = np.reshape ( msh.vectors, ( -1, 3 ))
+    # print ( 'ptVectors shape: {0}'.format ( ptVectors.shape )) # DEBUG
     # change shape( facets * 3, 3 ) to ( facets * 3, 1 ) of stringified vectors
-    ptStrings = [ point2str ( pt ) for pt in  ptVectors ]
+    ptStrings = [ point2str ( pt ) for pt in  ptVectors ] # not a numpy array
 
     # unqStrings = unique vector string representations from ptStrings
-    # idx = indicies into ptStrings that gave entries in unqStrings
+    # idx = indexes into ptStrings that gave entries in unqStrings
     # facePoints = for each ptString entry, index in unqStrings
     unqStrings, idx, facePoints = np.unique ( ptStrings, return_index = True, return_inverse = True )
+    # print ( 'unqStrings shape: {0}'.format ( unqStrings.shape )) # DEBUG
+    # print ( 'idx shape: {0}'.format ( idx.shape )) # DEBUG
+    # print ( 'facePoints shape: {0}'.format ( facePoints.shape )) # DEBUG
 
+    pts = np.array([ ptVectors [ i ] for i in idx ])
+    # print ( pts.dtype ) # DEBUG float32
+    fp = np.reshape ( facePoints, ( -1, 3 ))
+    # print ( fp.dtype ) # DEBUG int64
     mdl [ 'objects' ].append ({
-        'points': [ ptVectors [ i ] for i in idx ] , # Get numeric version of vectors back
+        'points': np.array([ ptVectors [ i ] for i in idx ]), # Get numeric version of vectors back
         'faces': np.reshape ( facePoints, ( -1, 3 )) }) # straight vectors lookup to groups of face points
 # end mesh2scadDedup (…)
+
+
+"""splitDisjointObjects( mdl )
+
+split disjoint surfaces into separate objects
+
+@param mdl - the 3d scad model to update with no duplicate points in any object
+@outputs updated mdl
+"""
+def splitDisjointObjects( mdl ):
+    # print ( 'splitDisjointObjects:' ) # TRACE
+    # Storage for new objects created from the surfaces of existing model objects
+    surfaceObjects = []
+
+    for obj in mdl [ 'objects' ]:
+        # print ( 'obj: {0}'.format ( obj )) # DEBUG
+        # print ( 'points shape: {0} of {1} with {2} coords'.format (
+        #     obj [ 'points' ].shape, obj [ 'points' ].dtype, obj [ 'points' ].size )) # DEBUG
+        # print ( 'faces shape: {0} of {1} with {2} vertices'.format (
+        #     obj [ 'faces' ].shape, obj [ 'faces' ].dtype, obj [ 'faces' ].size )) # DEBUG
+        # print ( 'all faces:\n{0}'.format ( obj [ 'faces' ])) # DEBUG
+        objectSurfaces = [] # empty list of surfaces for object
+
+        # Edge endpoint (indexes) by face for whole object
+        objEdges = np.array ([[
+            [ fc [0], fc [1]],
+            [ fc [1], fc [2]],
+            [ fc [2], fc [0]]] for fc in obj [ 'faces' ]])
+        # index number of faces that are not (yet) on any surface
+        noSurfaceFaces = set ( np.arange ( 0, len ( obj [ 'faces' ])))
+        # print ( 'all faces of object index set: {0}'.format ( noSurfaceFaces )) # DEBUG
+
+        # IDEA check for self intersecting surfaces: maybe a case where an edge
+        # is referenced twice? (twice in each direction)
+        if ( not checkEdgeEndpointUsage ( objEdges, len ( obj [ 'points' ]))):
+            print ( 'problem detected with face edge endpoint references' )
+        # The (directed) edges that make up the surface mesh
+        rawEdges = np.reshape ( objEdges, (-1, 2 ))
+        if ( not checkEdgeReuse ( rawEdges )):
+            print ( 'problem detected with face edge usage' )
+
+        while ( len ( noSurfaceFaces ) > 0 ):
+            # There are still some faces that have not been associated with a
+            # surface
+            # print ( '{0} faces not yet linked to a surface: {1}'.format (
+            #     len ( noSurfaceFaces ), noSurfaceFaces )) # DEBUG
+
+            # Can not append to a numpy array: they are immutable, making the
+            # add faces and edges processing convoluted.
+            # surface = { 'faces': np.empty( 0, np.int64 ),
+            #     'edges': np.empty(( 0, 2 ), np.int64 )}
+
+            # Standard python lists are easy to append to, but are harder to
+            # search, to look for an index to a known element (value)
+            surface = { 'faceindex': array.array( 'I' ),
+                'edgehash': array.array( 'L' )}
+            # Maximum number of triangles (faces) that can be loaded by
+            # numpy-stl is 100000000, or 0x05f5e100, so never more than 3 times
+            # that 3d points.  An end point index will always fit in a 32 bit
+            # integer, so 2 will fit in a long (both unsigned for convenience),
+            # to create a searchable / comparible hash for an edge.
+
+            # get the first face to use for the (next) new surface
+            startFace = noSurfaceFaces.copy ().pop () # any random face index
+            # Add this face, all connected faces, and the edges that bound them
+            # to a new surface.
+
+            # add the first face to the surface, along with its edges
+            addFaceEdges ( surface, obj, startFace )
+            # add the reset of the connected faces and edges to complete the
+            # surface
+            curEdge = 0
+            while ( curEdge < len ( surface [ 'edgehash' ])):
+                # print ( 'processing edge {0} of {1}'.format (
+                #     curEdge, len ( surface [ 'edges' ]))) # DEBUG
+                nextFace = getAdjacentFace ( surface, objEdges, curEdge )
+                addFaceEdges ( surface, obj, nextFace ) # add new face to the surface, with its edges
+                curEdge += 1
+            # end while ( curEdge < len ( surface [ 'edgehash' ]))
+
+            # surface strcture now has all of the faces for one contiguous
+            # surface.  Add it to the list of surfaces for the object
+            objectSurfaces.append ( surface )
+            # print ( 'complete surface: {0}'.format (surface))
+            # print ( 'surface faces: {0}'.format ( surface [ 'faceindex' ])) # DEBUG
+            # Remove the faces on the surface from the set that does not yet
+            # belong to a surface
+            noSurfaceFaces = noSurfaceFaces.difference ( surface [ 'faceindex' ])
+            # print ( 'remaining faces: {0}'.format ( noSurfaceFaces )) # DEBUG
+        # end while ( len ( noSurfaceFaces ) > 0 )
+
+        # all faces of obj have now been added / assigned to a surface in
+        # objectSurfaces.
+        # print ( 'objectSurfaces: {0}'.format ( objectSurfaces ))
+        # print ( 'input object: {0}'.format ( obj ))
+        # print ( 'input model: {0}'.format ( mdl ))
+
+        # To be able to create an OpenSCAD polyhedron, need the unique list of
+        # points for the included face vertices, and the (resequenced)
+        # indexes for the faces.
+        for sf in objectSurfaces:
+            obj4surface = surface2polyhedronObject ( sf, obj )
+            # print ( 'b4 change surfaceObjects: {0}'.format ( surfaceObjects ))
+            surfaceObjects.append ( obj4surface )
+        # print ( 'after chg surfaceObjects: {0}'.format ( surfaceObjects )) # DEBUG
+    # end for obj in mdl [ 'objects' ]
+
+    # print ( '\ninput model: {0}'.format ( mdl )) # DEBUG
+    # print ( 'input object(s): {0}'.format ( mdl [ 'objects' ])) # DEBUG
+    # print ( 'surface object: {0}'. format ( surfaceObjects )) # DEBUG
+    # print ( 'input points: {0}'.format ([ o [ 'points' ] for o in mdl [ 'objects' ]])) # DEBUG
+    # print ( 'input facess: {0}'.format ([ o [ 'faces' ] for o in mdl [ 'objects' ]])) # DEBUG
+
+    mdl [ 'objects' ] = surfaceObjects
+    # print ( 'output model: {0}'.format ( mdl ))
+    # print ( 'output objects: {0}'.format ( mdl [ 'objects' ]))
+
+    # print ()
+    # print ( 'output points: {0}'.format ([ o [ 'points' ] for o in mdl [ 'objects' ]]))
+    # print ( 'output faces: {0}'.format ([ o [ 'faces' ] for o in mdl [ 'objects' ]]))
+
+    #numpy.where http://docs.scipy.org/doc/numpy/reference/generated/numpy.where.html#numpy.where
+    # http://stackoverflow.com/questions/25823608/find-matching-rows-in-2-dimensional-numpy-array#25823673
+    # http://stackoverflow.com/questions/10565598/numpy-how-to-check-if-array-contains-certain-numbers#10565640
+# end splitDisjointObjects(…)
+
+
+"""addFaceEdges ( sf, o, faceNum )
+
+Add a single face (by index) to the working surface, as well as all of the
+edges for that face
+
+@param sf - working surface structure (dictionary)
+@param o - source object structure for the face information
+@param faceNum - the index of the face to add from o [ 'faces' ], or None
+@outputs updated sf
+"""
+def addFaceEdges ( sf, o, faceNum ):
+    # print ( 'addFaceEdges index {0}'.format ( faceNum )) # TRACE
+    if ( faceNum == None ):
+        return # No face to add
+    # print ( 'starting surface: {0}'.format ( sf )) # DEBUG
+    # print ( 'faces, edges typecode: {0}, {1}'.format (
+    #     sf [ 'faces'].typecode, sf [ 'edges'].typecode )) # DEBUG
+
+    # print ( faceNum in sf [ 'faces' ]) # DEBUG
+    if ( faceNum in sf [ 'faceindex' ]):
+        # the specified face is already part of the surface
+        # nothing to do here
+        print ( 'face {0} already part of the current surface'.format ( faceNum )) # DEBUG
+        return
+
+    # faceNum index is not yet in the set (array) for the current surface
+
+    sf [ 'faceindex' ].append ( faceNum ) # Add face number to the surface
+    # print ( faceNum in sf [ 'faces' ]) # DEBUG
+    # print ( 'surface: {0}'.format ( sf )) # DEBUG
+
+    # print ( 'new Face edges: {0}'.format ( o [ 'faces' ][ faceNum ])) # DEBUG
+    # generate directly comparable lookup keys for each (directed) pair of
+    # edge endpoints.  Easy to test if exists, and can extract the original
+    # index values to be able to do lookup in the original obj [ 'edges' ]
+    edgesHash = array.array( 'L', [
+        o [ 'faces'][ faceNum ][ 0 ] << 32 | o [ 'faces'][ faceNum ][ 1 ],
+        o [ 'faces'][ faceNum ][ 1 ] << 32 | o [ 'faces'][ faceNum ][ 2 ],
+        o [ 'faces'][ faceNum ][ 2 ] << 32 | o [ 'faces'][ faceNum ][ 0 ]
+        ]) # generate unique hash for the directed edge endpoints
+    # print ( edgesHash ) # DEBUG
+
+    # add any edges of face [ faceNum ] that are not already in sf [ edges ]
+    for hsh in edgesHash:
+        # print ( 'hash key {0:016h}'.format ( hsh )) # DEBUG
+        # Given the calling sequence, should not need to check for existing
+        # edges.  The directed edges used will only exist in a single face, so
+        # if the face does not exist on the surface, neither do the edges.
+        # At least for a 'proper' surface mesh.
+        if ( not hsh in sf [ 'edgehash' ]):
+            sf [ 'edgehash' ].append ( hsh )
+    # print ( 'surface: {0}'.format ( sf )) # DEBUG
+# end addFaceEdges (…)
+
+
+"""getAdjacentFace ( sf, fe, idx )
+
+Get the number (index) of the face that includes the edge that is the reverse
+direction of the passed (hashed) edge
+
+@param sf - working surface structure (dictionary)
+@param fe - array of directed edges for the object faces
+@param idx - index of the edge to process (in sf [ 'edgehash' ])
+@return face number to add to the surface
+"""
+def getAdjacentFace ( sf, fe, idx ):
+    # print ( 'edge {0} hash is {1:016x}'.format ( idx, sf [ 'edges'][ idx ])) # DEBUG
+    # get the existing stored edge hash from the surface
+    edgHash = sf [ 'edgehash'][ idx ]
+    # get the edge end point indexes back from the (searchable) hash
+    reverseEdge = [ edgHash & 0xffffffff, edgHash >> 32 ]
+    # create a new hash for the reverse direction edge
+    reverseHash = reverseEdge [ 0 ] << 32 | reverseEdge [ 1 ]
+    # print ( 'reverse edge: {0}: {1:016x}'.format ( reverseEdge, reverseHash )) # DEBUG
+
+    if ( reverseHash in sf [ 'edgehash' ]):
+        # Every (directed) edge for a surface is only used once, on a single face.
+        # When a face is added to the surface, all of the associated edges are too.
+        # If an edge exists in the surface, the owning face is already there, and so
+        # are the other edges of that face
+        # print ( 'reverse edge hash {0:016x} already on the surface'.format ( reverseHash )) # DEBUG
+        return None
+
+    # The reverse direction edge hash is not in the surface yet, so neither is
+    # the face it is part of.
+    owningFace = np.where(( fe == reverseEdge ).all ( axis = 2 ))[ 0 ][ 0 ]
+    # print ( 'face {0} includes edge {1}'.format ( owningFace, reverseEdge )) # DEBUG
+    return owningFace
+# end getAdjacentFace (…)
+
+
+"""surface2polyhedronObject ( sf, o )
+
+@param sf - working surface structure (dictionary)
+@param o - source object structure for the face information
+"""
+def surface2polyhedronObject ( sf, o ):
+    # print ( 'final surface: {0}'.format ( sf )) # DEBUG
+    # print ( 'main object: {0}'.format ( o )) # DEBUG
+
+    # edge hashs to raw obj [ 'points' ] index numbers as np.array
+    surfaceEdges = np.array ([[ hsh >> 32, hsh & 0xffffffff ] for hsh in sf [ 'edgehash' ]])
+    # print ( 'surface edges:\n{0}'.format ( surfaceEdges )) # DEBUG
+
+    # unique edge end point indexes
+    uniqueEndPoints = np.unique ( surfaceEdges ).tolist ()
+    # print ( 'Endpoint indexes: {0}'.format ( uniqueEndPoints )) # DEBUG
+    # print ( o [ 'points' ])
+
+    surfacePoints = np.array ([ o [ 'points' ][ idx ] for idx in uniqueEndPoints ])
+    # print ( surfacePoints )
+    # create lookup from old to new point location
+    #   lookup = [[ uniqueEndPoints [ i ], i ] for i in np.arange( 0, len ( uniqueEndPoints ))]
+    #     not needed: uniqueEndPoints can be used directly: uniqueEndPoints.index( oldIndex )
+    # for faceIdx in sf [ 'faceindex' ]:
+    #   print ([ uniqueEndPoints.index ( pt ) for pt in o [ 'faces' ][ faceIdx ]])
+    surfaceFaces = np.array ([[ uniqueEndPoints.index ( pt )
+        for pt in o [ 'faces' ][ faceIdx ]]
+        for faceIdx in sf [ 'faceindex' ]])
+    # print ( surfaceFaces ) # DEBUG
+
+    # create and return a 3d object dictionary
+    return { 'faces': surfaceFaces, 'points': surfacePoints }
+# end surface2polyhedronObject (…)
+
+
+# def mergeCoplanarFaces ( mdl ):
 
 
 """model2File ( mdl )
@@ -272,8 +534,10 @@ def processStlFile ( fh ):
     # «raw¦dedup¦split¦simplify¦«?other?»»
     # mesh2scadTrivial ( scadModel, stlMesh ) # DEBUG
     mesh2scadDedup ( scadModel, stlMesh )
+    # split to multiple output objects for disjoint input surface meshes
+    splitDisjointObjects( scadModel )
 
-    model2File ( scadModel )
+    model2File ( scadModel ) # save the objects to .scad module files
 # end processStlFile (…)
 
 
@@ -293,6 +557,98 @@ def newScadModel ( srcSpec ):
         'objects': []
     }
 # end newScadModel (…)
+
+
+"""checkEdgeEndpointUsage ( edges, pntCnt )
+
+Verify that every vertex in the surface is referenced in at least 3 different
+faces.
+
+@param pntCnt - number of vertices for the surface
+@param edges - numpy array of surface edges by face
+@returns boolean false if problem seen with the edge endpoint references
+"""
+def checkEdgeEndpointUsage ( edges, pntCnt ):
+    allGood = True
+    reportedSome = False
+
+    # print ( 'all edges shape: {0}'.format ( edges.shape )) # DEBUG
+    # print ( 'all edges shape: {0}, content:\n{1}'.format (
+    #     edges.shape, edges )) # DEBUG
+
+    # Edge endpoint references
+    edgeEndpointindexes = np.reshape ( edges, -1 ).tolist()
+    # print ( 'edges endpoint count = {0}; content:\n{1}'.format (
+    #     len ( edgeEndpointindexes ), edgeEndpointindexes )) # DEBUG
+
+    # number of reference to each vertex (in points)
+    vertexReferences = [ edgeEndpointindexes.count ( idx )
+        for idx in np.arange ( 0, pntCnt )]
+    # print ( 'vertex counts: {0}'.format ( vertexReferences )) # DEBUG
+    if ( cmdLineArgs.verbose ):
+        print ( 'Each face vertex is used from {0} to {1} times'.format (
+            min ( vertexReferences ), max ( vertexReferences )))
+        reportedSome = True
+    if ( min ( vertexReferences ) < 3 ):
+        allGood = False
+        # Need at least 3 references to every vertex of a triangle mesh
+        # to have a manifold surface
+        print ( 'Not enough face vertex reference to close the surface' )
+        reportedSome = True
+
+    # IDEA TODO make sure no vertex (index) is referenced more than once per face
+    if ( reportedSome ):
+        print ( '' )
+    return allGood
+# end checkEdgeEndpointUsage (…)
+
+
+"""checkEdgeReuse ( edges )
+
+Verify that every (directed) edge has a matching reverse direction edge
+
+@param edges - numpy array of surface edges
+@returns boolean false if problem seen with the edges that are in the surface
+"""
+def checkEdgeReuse ( edges ):
+    # print ( 'checkEdgeReuse' ) # TRACE
+    allGood = True
+
+    # print ( 'face edges shape: {0}'.format ( edges.shape )) # DEBUG
+    # print ( 'face edges shape: {0}; content:\n{1}'.format (
+    #     edges.shape, edges )) # DEBUG
+    # print ( 'face edges shape: {0}; content:\n{1}'.format (
+    #     edges.shape, edges.tolist ())) # DEBUG
+
+    # print ( edges == ( 3, 0 ))
+    # print (( edges == ( 3, 0 )).all (axis = 1 ))
+    # print ( np.where(( edges == ( 3, 0 )).all ( axis = 1 )))
+    # print ( np.where(( edges == ( 0, 3 )).all ( axis = 1 )))
+    # print ([ np.where(( edges == ( 3, 0 )).all ( axis = 1 ))[ 0 ][ 0 ]])
+    # print ([ np.where(( edges == ( 0, 3 )).all ( axis = 1 ))[ 0 ][ 0 ]])
+    # print ( np.where(( edges == ( 0, 3 )).all ( axis = 1 ))[ 0 ].size )
+
+    # the number of instances (in faces) of each edge
+    edgeCounts = [ np.where(( edges == ( edg [ 0 ], edg [ 1 ])).all (
+        axis = 1 ))[ 0 ].size for edg in edges ]
+    # print ( 'Edge usage counts: {0}'.format ( edgeCounts )) # DEBUG
+    # print ( '{0} Edges used exactly once'.format ( edgeCounts.count ( 1 ))) # DEBUG == len ( edges )
+    if ( max ( edgeCounts ) > 1 ):
+        allGood = False
+        # These are directed edges: no edge should be reused
+        print ( 'Duplicate edges encountered' )
+
+    # the number of instances (in faces) of edges going the reverse direction
+    counterEdgeCounts = [ np.where(( edges == ( edg [ 1 ], edg [ 0 ])).all (
+        axis = 1 ))[ 0 ].size for edg in edges ]
+    # print ( 'Reverse direction edge usage counts: {0}'.format ( counterEdgeCounts )) # DEBUG
+    if ( min ( counterEdgeCounts ) < 1 ):
+        allGood = False
+        print ( 'Missing {0} reverse direction edges'.format ( counterEdgeCounts.count ( 0 )))
+
+    # IDEA TODO check that reverse edge is not in the same face
+    return allGood
+# end checkEdgeReuse (…)
 
 
 def main ():

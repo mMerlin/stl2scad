@@ -126,6 +126,10 @@ https://virtualenv.pypa.io/en/
 ## notes
 * /home/phil/Documents/evernote/stl file manipultaion.md
 
+Need a sample stl file with separate objects connected at a single edge
+
+IDEA remove test stl file(s) from repository that are generated programatically
+
 NOTE: Remember to post a note to https://w.wol.ph/ ¦ Rick van Hattem ¦ https://github.com/WoLpH/numpy-stl/ when have a usable / public version of stl2scad
 
 * web search
