@@ -9,9 +9,6 @@ This processing logic for this code was initially based on
 https://github.com/joshuaflanagan/stl2scad, which in turn came (indirectly)
 from the Riham javascript code http://www.thingiverse.com/thing:62666.
 
-Ascii STL file format http://www.fabbers.com/tech/STL_Format#Sct_ASCII
-Binary STL file format http://www.fabbers.com/tech/STL_Format#Sct_binary
-
 Big thanks to [numpy-stl](https://github.com/WoLpH/numpy-stl/) for doing the
 heavy lifting of parsing and loading stl files.
 
@@ -26,15 +23,16 @@ import argparse
 import numpy as np
 from stl import mesh
 import array
+import time # DEBUG
 
-# Pseudo constants: some would be better as enums, but backward compatibility …
-# IDEA import enum for python2
+# Pseudo constants
 # Semantic Versioning 2.0.0 # http://semver.org/
-STL2SCAD_VERSION = '0.0.3'
+STL2SCAD_VERSION = '0.0.4'
 isV3 = ( sys.hexversion >= 0x030000F0 ) # running with python3 or later
 
 # regular globals: might be better implemented as singleton
-# objectSequence = 0
+# objectSequence = 0 # use when multiple stl input files, and overriding output
+# file or module name
 cmdLineArgs = None # command line line argument information used throughout
 cfg = {}
 
@@ -46,7 +44,7 @@ Populate .scad 3d model from a stored stl mesh
 Trivial conversion: vertex to point, facet to face, with no changes
 
 @param mdl - the 3d scad model to update
-@param msh - the stl mesh (numpy-stl) to get update information from
+@param msh - the stl mesh (numpy-stl) to get model information from
 @outputs updated mdl
 """
 def mesh2scadTrivial ( mdl, msh ):
@@ -57,41 +55,30 @@ def mesh2scadTrivial ( mdl, msh ):
 # end mesh2scadTrivial (…)
 
 
-"""mesh2scadDedup  ( mdl, msh )
+"""mesh2scadDedup ( mdl, msh )
 
 Populate .scad 3d model from a stored stl mesh
 
-De-duplicated conversion: matching facet to faces, but with only unique points
-from vertices
+Remove duplicate vertices, and adjust the face indices to match the collapsed
+set of data points.
 
 @param mdl - the 3d scad model to update
 @param msh - the stl mesh (numpy-stl) to get update information from
 @outputs updated mdl
 """
 def mesh2scadDedup ( mdl, msh ):
-    # http://docs.scipy.org/doc/numpy/reference/generated/numpy.unique.html
-    # np.unique works with a 1d (flatten) array.
-
-    # change shape( facets, 3, 3 ) to ( facets * 3, 3 ) of float coordinates
-    ptVectors = np.reshape ( msh.vectors, ( -1, 3 ))
-    # print ( 'ptVectors shape: {0}'.format ( ptVectors.shape )) # DEBUG
-    # change shape( facets * 3, 3 ) to ( facets * 3, 1 ) of stringified vectors
-    ptStrings = [ point2str ( pt ) for pt in  ptVectors ] # not a numpy array
+    ptVectors = np.reshape ( msh.vectors, ( -1, 3 )) # ( n, 3, 3 ) to ( 3n, 3 )
+    ptStrings = [ point2str ( pt ) for pt in  ptVectors ] # 3n strings, not a numpy array
 
     # unqStrings = unique vector string representations from ptStrings
-    # idx = indexes into ptStrings that gave entries in unqStrings
+    # vectorIdx = indexes into ptStrings that gave entries in unqStrings
     # facePoints = for each ptString entry, index in unqStrings
-    unqStrings, idx, facePoints = np.unique ( ptStrings, return_index = True, return_inverse = True )
-    # print ( 'unqStrings shape: {0}'.format ( unqStrings.shape )) # DEBUG
-    # print ( 'idx shape: {0}'.format ( idx.shape )) # DEBUG
-    # print ( 'facePoints shape: {0}'.format ( facePoints.shape )) # DEBUG
+    unqStrings, vectorIdx, facePoints = np.unique (
+        ptStrings, return_index = True, return_inverse = True )
 
-    pts = np.array([ ptVectors [ i ] for i in idx ])
-    # print ( pts.dtype ) # DEBUG float32
-    fp = np.reshape ( facePoints, ( -1, 3 ))
-    # print ( fp.dtype ) # DEBUG int64
+    # scad polyhedron details
     mdl [ 'objects' ].append ({
-        'points': np.array([ ptVectors [ i ] for i in idx ]), # Get numeric version of vectors back
+        'points': np.array([ ptVectors [ i ] for i in vectorIdx ]), # Get numeric version of vectors back
         'faces': np.reshape ( facePoints, ( -1, 3 )) }) # straight vectors lookup to groups of face points
 # end mesh2scadDedup (…)
 
@@ -100,85 +87,55 @@ def mesh2scadDedup ( mdl, msh ):
 
 split disjoint surfaces into separate objects
 
-@param mdl - the 3d scad model to update with no duplicate points in any object
+NOTE requires an already deduplicated model
+
+@param mdl - the 3d scad model to update
 @outputs updated mdl
 """
 def splitDisjointObjects( mdl ):
-    # print ( 'splitDisjointObjects:' ) # TRACE
-    # Storage for new objects created from the surfaces of existing model objects
-    surfaceObjects = []
+    surfaceObjects = [] # disjoint polyhedrons
 
     for obj in mdl [ 'objects' ]:
-        # print ( 'obj: {0}'.format ( obj )) # DEBUG
-        # print ( 'points shape: {0} of {1} with {2} coords'.format (
-        #     obj [ 'points' ].shape, obj [ 'points' ].dtype, obj [ 'points' ].size )) # DEBUG
-        # print ( 'faces shape: {0} of {1} with {2} vertices'.format (
-        #     obj [ 'faces' ].shape, obj [ 'faces' ].dtype, obj [ 'faces' ].size )) # DEBUG
-        # print ( 'all faces:\n{0}'.format ( obj [ 'faces' ])) # DEBUG
-        objectSurfaces = [] # empty list of surfaces for object
+        # hashedFaceEdges = [[ … ] for oneFace in obj [ 'faces' ]]
+        # shape ( -1, 3 ); edge hashes by face; standard python list of arrays
+        # IDEA array of arrays ?
+        hashedFaceEdges = [ array.array ( 'L', [
+            oneFace [ 0 ] << 32 | oneFace [ 1 ],
+            oneFace [ 1 ] << 32 | oneFace [ 2 ],
+            oneFace [ 2 ] << 32 | oneFace [ 0 ]])
+            for oneFace in obj [ 'faces' ]]
+        # when (above) is used in addFacesAndEdges, it is significantly faster
+        # than using the equivalent numpy array below.  A standard python list
+        # is about the same speed as the numpy array.  It appears that the
+        # iterator for an array is a lot faster than the other 2.
+        # hsh1 = np.array ([[ … ] for oneFace in obj [ 'faces' ]])
 
-        # Edge endpoint (indexes) by face for whole object
-        objEdges = np.array ([[
-            [ fc [0], fc [1]],
-            [ fc [1], fc [2]],
-            [ fc [2], fc [0]]] for fc in obj [ 'faces' ]])
+        # shape ( -1 ); hash by edge; list
+        # hashedEdges = array.array ( 'L', np.reshape ( hashedFaceEdges, -1 ).tolist()) # 12sec
+        hashedEdges = np.reshape ( hashedFaceEdges, -1 ).tolist() # 9.9sec processing
+
+        edgeHashes = {
+            'byFace': hashedFaceEdges, # used in addFaceAndEdges
+            'byEdge': hashedEdges # used in getAdjacentFace
+        }
         # index number of faces that are not (yet) on any surface
+        objectSurfaces = [] # disjoint surfaces for object
         noSurfaceFaces = set ( np.arange ( 0, len ( obj [ 'faces' ])))
-        # print ( 'all faces of object index set: {0}'.format ( noSurfaceFaces )) # DEBUG
-
-        # IDEA check for self intersecting surfaces: maybe a case where an edge
-        # is referenced twice? (twice in each direction)
-        if ( not checkEdgeEndpointUsage ( objEdges, len ( obj [ 'points' ]))):
-            print ( 'problem detected with face edge endpoint references' )
-        # The (directed) edges that make up the surface mesh
-        rawEdges = np.reshape ( objEdges, (-1, 2 ))
-        if ( not checkEdgeReuse ( rawEdges )):
-            print ( 'problem detected with face edge usage' )
 
         while ( len ( noSurfaceFaces ) > 0 ):
             # There are still some faces that have not been associated with a
-            # surface
-            # print ( '{0} faces not yet linked to a surface: {1}'.format (
-            #     len ( noSurfaceFaces ), noSurfaceFaces )) # DEBUG
+            # disjoint surface
 
-            # Can not append to a numpy array: they are immutable, making the
-            # add faces and edges processing convoluted.
-            # surface = { 'faces': np.empty( 0, np.int64 ),
-            #     'edges': np.empty(( 0, 2 ), np.int64 )}
+            # Collect faces to form the closed surface containing the next
+            # unused face
+            start_time = time.time()
+            surface = collectSurfaceFaces(
+                obj, edgeHashes, noSurfaceFaces.copy().pop())
+            end_time = time.time()
+            print ( 'elapsed time collectSurfaceFaces: {0}'.format ( end_time - start_time )) # DEBUG
 
-            # Standard python lists are easy to append to, but are harder to
-            # search, to look for an index to a known element (value)
-            surface = { 'faceindex': array.array( 'I' ),
-                'edgehash': array.array( 'L' )}
-            # Maximum number of triangles (faces) that can be loaded by
-            # numpy-stl is 100000000, or 0x05f5e100, so never more than 3 times
-            # that 3d points.  An end point index will always fit in a 32 bit
-            # integer, so 2 will fit in a long (both unsigned for convenience),
-            # to create a searchable / comparible hash for an edge.
-
-            # get the first face to use for the (next) new surface
-            startFace = noSurfaceFaces.copy ().pop () # any random face index
-            # Add this face, all connected faces, and the edges that bound them
-            # to a new surface.
-
-            # add the first face to the surface, along with its edges
-            addFaceEdges ( surface, obj, startFace )
-            # add the reset of the connected faces and edges to complete the
-            # surface
-            curEdge = 0
-            while ( curEdge < len ( surface [ 'edgehash' ])):
-                # print ( 'processing edge {0} of {1}'.format (
-                #     curEdge, len ( surface [ 'edges' ]))) # DEBUG
-                nextFace = getAdjacentFace ( surface, objEdges, curEdge )
-                addFaceEdges ( surface, obj, nextFace ) # add new face to the surface, with its edges
-                curEdge += 1
-            # end while ( curEdge < len ( surface [ 'edgehash' ]))
-
-            # surface strcture now has all of the faces for one contiguous
-            # surface.  Add it to the list of surfaces for the object
+            # Add new surface to the list of surfaces for the object
             objectSurfaces.append ( surface )
-            # print ( 'complete surface: {0}'.format (surface))
-            # print ( 'surface faces: {0}'.format ( surface [ 'faceindex' ])) # DEBUG
             # Remove the faces on the surface from the set that does not yet
             # belong to a surface
             noSurfaceFaces = noSurfaceFaces.difference ( surface [ 'faceindex' ])
@@ -187,114 +144,124 @@ def splitDisjointObjects( mdl ):
 
         # all faces of obj have now been added / assigned to a surface in
         # objectSurfaces.
-        # print ( 'objectSurfaces: {0}'.format ( objectSurfaces ))
-        # print ( 'input object: {0}'.format ( obj ))
-        # print ( 'input model: {0}'.format ( mdl ))
 
         # To be able to create an OpenSCAD polyhedron, need the unique list of
         # points for the included face vertices, and the (resequenced)
         # indexes for the faces.
         for sf in objectSurfaces:
+            # IDEA only pass the face index set sf [ 'faceindex' ]
             obj4surface = surface2polyhedronObject ( sf, obj )
-            # print ( 'b4 change surfaceObjects: {0}'.format ( surfaceObjects ))
             surfaceObjects.append ( obj4surface )
-        # print ( 'after chg surfaceObjects: {0}'.format ( surfaceObjects )) # DEBUG
     # end for obj in mdl [ 'objects' ]
 
-    # print ( '\ninput model: {0}'.format ( mdl )) # DEBUG
-    # print ( 'input object(s): {0}'.format ( mdl [ 'objects' ])) # DEBUG
-    # print ( 'surface object: {0}'. format ( surfaceObjects )) # DEBUG
-    # print ( 'input points: {0}'.format ([ o [ 'points' ] for o in mdl [ 'objects' ]])) # DEBUG
-    # print ( 'input facess: {0}'.format ([ o [ 'faces' ] for o in mdl [ 'objects' ]])) # DEBUG
-
     mdl [ 'objects' ] = surfaceObjects
-    # print ( 'output model: {0}'.format ( mdl ))
-    # print ( 'output objects: {0}'.format ( mdl [ 'objects' ]))
-
-    # print ()
-    # print ( 'output points: {0}'.format ([ o [ 'points' ] for o in mdl [ 'objects' ]]))
-    # print ( 'output faces: {0}'.format ([ o [ 'faces' ] for o in mdl [ 'objects' ]]))
-
-    #numpy.where http://docs.scipy.org/doc/numpy/reference/generated/numpy.where.html#numpy.where
-    # http://stackoverflow.com/questions/25823608/find-matching-rows-in-2-dimensional-numpy-array#25823673
-    # http://stackoverflow.com/questions/10565598/numpy-how-to-check-if-array-contains-certain-numbers#10565640
 # end splitDisjointObjects(…)
 
 
-"""addFaceEdges ( sf, o, faceNum )
+""" collectSurfaceFaces( obj, edgData, seedFace )
+
+Extract a single closed surface from the object face data
+
+@param obj - 3d polyhedron object with (disjoint) surfaces
+@param edgData - dictionary with different formats of edge data and hashes
+@param oneFace
+@returns dictionary with set of faces on the closed surface
+"""
+def collectSurfaceFaces( obj, edgData, seedFace ):
+    # numpy array is immutable: no dynamic appending;
+    # newSurface = { 'faces': np.empty( 0, np.int64 ), 'edges': np.empty(( 0, 2 ), np.int64 )}
+    # newSurface = { 'faceindex': array.array( 'I' ), 'edgehash': array.array( 'L' )}
+    # newSurface = { 'faceindex': [], 'edgehash': []}
+
+    # Change from 37 to 21 seconds when change edgehast from array to list,
+    # reduce another second also change faceindex to list, and using a set saves
+    # another second.  edgehash must be accessed by index, so can not be a set.
+    # 18.92140293121338 1.9472167491912842 3.6548094749450684 2.272865056991577 9.772452592849731
+    newSurface = { 'faceindex': set(), 'edgehash': []}
+
+    # add the first face to the surface, along with its edges
+    addFaceAndEdges ( newSurface, seedFace, edgData )
+
+    # add the rest of the connected faces and edges to complete the surface
+    curEdge = 0
+    while ( curEdge < len ( newSurface [ 'edgehash' ])):
+        nextFace = getAdjacentFace ( newSurface, edgData, curEdge )
+        addFaceAndEdges ( newSurface, nextFace, edgData ) # add new face to the surface, with its edges
+        curEdge += 1
+    # end while ( curEdge < len ( newSurface [ 'edgehash' ]))
+
+    # newSurface structure now has all of the faces for one closed surface
+
+    # IDEA return newSurface [ 'faceindex' ]
+    return newSurface
+# end collectSurfaceFaces (…)
+
+
+"""addFaceAndEdges ( sf, faceNum, edgDt )
 
 Add a single face (by index) to the working surface, as well as all of the
 edges for that face
 
 @param sf - working surface structure (dictionary)
-@param o - source object structure for the face information
 @param faceNum - the index of the face to add from o [ 'faces' ], or None
+@param edgDt - pregenerated edge (hash) data
 @outputs updated sf
 """
-def addFaceEdges ( sf, o, faceNum ):
-    # print ( 'addFaceEdges index {0}'.format ( faceNum )) # TRACE
+def addFaceAndEdges ( sf, faceNum, edgDt ):
     if ( faceNum == None ):
         return # No face to add
-    # print ( 'starting surface: {0}'.format ( sf )) # DEBUG
-    # print ( 'faces, edges typecode: {0}, {1}'.format (
-    #     sf [ 'faces'].typecode, sf [ 'edges'].typecode )) # DEBUG
 
-    # print ( faceNum in sf [ 'faces' ]) # DEBUG
-    if ( faceNum in sf [ 'faceindex' ]):
-        # the specified face is already part of the surface
-        # nothing to do here
+    if ( faceNum in sf [ 'faceindex' ]): # face index already part of surface
         print ( 'face {0} already part of the current surface'.format ( faceNum )) # DEBUG
         return
 
     # faceNum index is not yet in the set (array) for the current surface
 
-    sf [ 'faceindex' ].append ( faceNum ) # Add face number to the surface
-    # print ( faceNum in sf [ 'faces' ]) # DEBUG
-    # print ( 'surface: {0}'.format ( sf )) # DEBUG
-
-    # print ( 'new Face edges: {0}'.format ( o [ 'faces' ][ faceNum ])) # DEBUG
-    # generate directly comparable lookup keys for each (directed) pair of
-    # edge endpoints.  Easy to test if exists, and can extract the original
-    # index values to be able to do lookup in the original obj [ 'edges' ]
-    edgesHash = array.array( 'L', [
-        o [ 'faces'][ faceNum ][ 0 ] << 32 | o [ 'faces'][ faceNum ][ 1 ],
-        o [ 'faces'][ faceNum ][ 1 ] << 32 | o [ 'faces'][ faceNum ][ 2 ],
-        o [ 'faces'][ faceNum ][ 2 ] << 32 | o [ 'faces'][ faceNum ][ 0 ]
-        ]) # generate unique hash for the directed edge endpoints
-    # print ( edgesHash ) # DEBUG
+    # sf [ 'faceindex' ].append ( faceNum ) # Add face number to the surface
+    sf [ 'faceindex' ].add ( faceNum ) # Add face number to the surface
 
     # add any edges of face [ faceNum ] that are not already in sf [ edges ]
-    for hsh in edgesHash:
-        # print ( 'hash key {0:016h}'.format ( hsh )) # DEBUG
-        # Given the calling sequence, should not need to check for existing
-        # edges.  The directed edges used will only exist in a single face, so
-        # if the face does not exist on the surface, neither do the edges.
-        # At least for a 'proper' surface mesh.
-        if ( not hsh in sf [ 'edgehash' ]):
-            sf [ 'edgehash' ].append ( hsh )
-    # print ( 'surface: {0}'.format ( sf )) # DEBUG
-# end addFaceEdges (…)
+    # for hsh in edgDt [ 'naHshByFace' ][ faceNum ]:
+    # for hsh in edgDt [ 'naFwdBckEdgeHshByFace' ][ faceNum ][ 0 ]:
+    # for hsh in edgDt [ 'byFace' ][ faceNum ]: # significantly faster
+    #     # Given the calling sequence, should not need to check for existing
+    #     # edges.  The directed edges used will only exist in a single face, so
+    #     # if the face does not exist on the surface, neither do the edges.
+    #     # - At least for a 'proper' surface mesh. What about intersecting mesh?
+    #     # if ( not hsh in sf [ 'edgehash' ]):
+    #     #     sf [ 'edgehash' ].append ( hsh )
+    #     # Removing the exist check reduced time from 19 seconds to 12
+    #     sf [ 'edgehash' ].append ( hsh )
+    sf [ 'edgehash' ].extend ( edgDt [ 'byFace' ][ faceNum ])
+# end addFaceAndEdges (…)
 
 
-"""getAdjacentFace ( sf, fe, idx )
+"""getAdjacentFace ( sf, edgDt, idx )
 
 Get the number (index) of the face that includes the edge that is the reverse
 direction of the passed (hashed) edge
 
 @param sf - working surface structure (dictionary)
-@param fe - array of directed edges for the object faces
+@param edgDt - pre generated object edge data
 @param idx - index of the edge to process (in sf [ 'edgehash' ])
 @return face number to add to the surface
 """
-def getAdjacentFace ( sf, fe, idx ):
-    # print ( 'edge {0} hash is {1:016x}'.format ( idx, sf [ 'edges'][ idx ])) # DEBUG
+def getAdjacentFace ( sf, edgDt, idx ):
     # get the existing stored edge hash from the surface
     edgHash = sf [ 'edgehash'][ idx ]
     # get the edge end point indexes back from the (searchable) hash
-    reverseEdge = [ edgHash & 0xffffffff, edgHash >> 32 ]
     # create a new hash for the reverse direction edge
+
+    # 36.98764491081238 2.3244781494140625 4.5470497608184814 2.5732905864715576 12.860100984573364
+    reverseEdge = [ edgHash & 0xffffffff, edgHash >> 32 ]
     reverseHash = reverseEdge [ 0 ] << 32 | reverseEdge [ 1 ]
-    # print ( 'reverse edge: {0}: {1:016x}'.format ( reverseEdge, reverseHash )) # DEBUG
+
+    # # 37.41246938705444 2.3573713302612305 4.6279096603393555 2.613356590270996 12.97822880744934
+    # reverseHash = (( edgHash & 0xffffffff )<< 32 )|( edgHash >> 32 )
+
+    # # 58.20755434036255 8.15827989578247 15.179465055465698 10.866657018661499 40.346314668655396
+    # hshIdx = edgDt [ 'byEdge' ].index ( edgHash )
+    # reverseHash = edgDt [ 'laBckHshByEdge' ][ hshIdx ]
 
     if ( reverseHash in sf [ 'edgehash' ]):
         # Every (directed) edge for a surface is only used once, on a single face.
@@ -306,8 +273,9 @@ def getAdjacentFace ( sf, fe, idx ):
 
     # The reverse direction edge hash is not in the surface yet, so neither is
     # the face it is part of.
-    owningFace = np.where(( fe == reverseEdge ).all ( axis = 2 ))[ 0 ][ 0 ]
-    # print ( 'face {0} includes edge {1}'.format ( owningFace, reverseEdge )) # DEBUG
+    # owningFace = np.where(( edgDt [ 'naEdgeByFace' ] == reverseEdge ).all ( axis = 2 ))[ 0 ][ 0 ]
+    owningFace = int ( edgDt [ 'byEdge' ].index ( reverseHash ) / 3 )
+
     return owningFace
 # end getAdjacentFace (…)
 
@@ -315,6 +283,7 @@ def getAdjacentFace ( sf, fe, idx ):
 """surface2polyhedronObject ( sf, o )
 
 @param sf - working surface structure (dictionary)
+IDEA only pass the face index set
 @param o - source object structure for the face information
 """
 def surface2polyhedronObject ( sf, o ):
@@ -352,22 +321,40 @@ def surface2polyhedronObject ( sf, o ):
 
 """model2File ( mdl )
 
-Save 3d model to scad file
+Save 3d model to scad file(s)
 
-@param mdl - description of 3d OpenScad model
+@param mdl - description of 3d OpenScad model (as polyhedron)
 """
 def model2File ( mdl ):
     objCnt = len ( mdl [ 'objects' ])
     objSeq = '' if objCnt < 2 else 0
     # print ( 'model2File: {0} objects; starting sequence: {1}'
     #     ''.format ( objCnt, objSeq )) # DEBUG
+    wrapperFile = None
+    wFile = None
     for obj in mdl [ 'objects' ]:
         if ( objSeq == '' ):
             mName = mdl [ 'model' ]
         else:
             objSeq += 1
+            # TODO implement cmdLineArgs.precision
             mName = '{0}{1:03d}'.format ( mdl [ 'model' ], objSeq)
         # print ( 'module: "{0}"'.format ( mName )) # DEBUG
+
+        if ( not wrapperFile == mdl [ 'model' ]):
+            if ( not wFile == None):
+                # TODO handle --quiet
+                print ( 'object load wrapper ==> {0} '.format ( wFile.name ))
+                wFile.close ()
+            if ( objSeq == '' ):
+                wrapperFile = None
+                wFile = None
+            else:
+                wFile = initScadFile ( mdl, '' )
+                if ( wFile == None ):
+                    print ( 'failed to create OpenSCAD module wrapper file' )
+                    return False
+                wrapperFile = mdl [ 'model' ]
 
         oFile = initScadFile ( mdl, objSeq )
         if ( oFile == None ):
@@ -375,15 +362,24 @@ def model2File ( mdl ):
             print ( 'failed to create OpenSCAD module save file' )
             return False # IDEA continue, but set failure flag
         oFile.write ( cfg [ 'moduleFormat' ].format (
-                name  = mName,
-                # pts   = cfg [ 'dataJoin' ].join ( obj [ 'points' ]), # points already converted to strings
-                pts   = cfg [ 'dataJoin' ].join ([ point2str ( pt ) for pt in obj [ 'points' ]]),
-                faces = cfg [ 'dataJoin' ].join ([ point2str ( pt ) for pt in obj [ 'faces' ]])))
-        oFile.close()
+            name  = mName,
+            # pts   = cfg [ 'dataJoin' ].join ( obj [ 'points' ]), # points already converted to strings
+            pts   = cfg [ 'dataJoin' ].join ([ point2str ( pt ) for pt in obj [ 'points' ]]),
+            faces = cfg [ 'dataJoin' ].join ([ point2str ( pt ) for pt in obj [ 'faces' ]])))
+        if ( wrapperFile == mdl [ 'model' ]):
+            wFile.write ( 'use <{0}>\n'.format ( os.path.split ( oFile.name )[ 1 ]))
+            wFile.write ( '{0}();\n'.format ( mName ))
         # TODO handle --quiet
         print ( '{0} ==> {1}'.format (
             os.path.join ( mdl [ 'stlPath' ], mdl [ 'stlFile' ]),
             oFile.name ))
+        oFile.close ()
+
+    if ( not wrapperFile == None ):
+        # TODO handle --quiet
+        print ( 'object load wrapper ==> {0} '.format ( wFile.name ))
+        wFile.close()
+
     return True
 # end model2File (…)
 
@@ -534,8 +530,14 @@ def processStlFile ( fh ):
     # «raw¦dedup¦split¦simplify¦«?other?»»
     # mesh2scadTrivial ( scadModel, stlMesh ) # DEBUG
     mesh2scadDedup ( scadModel, stlMesh )
-    # split to multiple output objects for disjoint input surface meshes
-    splitDisjointObjects( scadModel )
+
+    print ( len ( scadModel [ 'objects' ][ 0 ]['faces' ]),
+        len ( scadModel [ 'objects' ][ 0 ]['points'])) # DEBUG
+    if ( cmdLineArgs.analyze ):
+        checkSurfaceIntegrity( scadModel )
+
+    if ( cmdLineArgs.split ):
+        splitDisjointObjects( scadModel )
 
     model2File ( scadModel ) # save the objects to .scad module files
 # end processStlFile (…)
@@ -559,48 +561,85 @@ def newScadModel ( srcSpec ):
 # end newScadModel (…)
 
 
-"""checkEdgeEndpointUsage ( edges, pntCnt )
+"""checkSurfaceIntegrity( mdl )
 
-Verify that every vertex in the surface is referenced in at least 3 different
-faces.
+Do checks to validate the integrity of the model surfaces.  Check for
+leaks, and more problems
 
-@param pntCnt - number of vertices for the surface
-@param edges - numpy array of surface edges by face
-@returns boolean false if problem seen with the edge endpoint references
+TODO summarize checks based on documentation for the individual function calls
+
+IDEA is it practical to run (some of) these checks against the raw mesh data
+loaded by numpy-stl ??
+- not really.  Needs to start with the de-dupped point list for the checks
+
+NOTE This code is **VERY** slow.  Both check functions.
+
+@param mdl - the 3d scad model to check
 """
-def checkEdgeEndpointUsage ( edges, pntCnt ):
+def checkSurfaceIntegrity( mdl ):
+    for obj in mdl [ 'objects' ]:
+        # IDEA check for self intersecting surfaces: maybe a case where an edge
+        # is referenced twice? (twice in each direction)
+
+        # checkVertexesOfFaces ( obj [ 'faces'], len ( obj [ 'points' ]))
+        # checkVertexesOfFaces ( obj [ 'faces'], obj [ 'points' ])
+        start_time = time.time () # DEBUG
+        if ( not checkVertexesOfFaces ( obj )):
+            print ( 'problem detected with face vertex references' )
+
+        end_time = time.time () # DEBUG
+        print ( 'elapsed time checkVertexesOfFaces: {0}'.format ( end_time - start_time )) # DEBUG
+
+        # Edge endpoint (indexes) by face for whole object
+        start_time = time.time () # DEBUG
+        edgByFace = np.array ([[
+            [ fc [0], fc [1]],
+            [ fc [1], fc [2]],
+            [ fc [2], fc [0]]] for fc in obj [ 'faces' ]])
+        # The (directed) edges that make up the surface mesh
+        if ( not checkEdgeReuse ( np.reshape ( edgByFace, (-1, 2 )) )):
+            print ( 'problem detected with face edge usage' )
+        end_time = time.time () # DEBUG
+        print ( 'elapsed time checkEdgeReuse: {0}'.format ( end_time - start_time )) # DEBUG
+# end checkSurfaceIntegrity(…)
+
+
+"""checkVertexesOfFaces ( obj )
+
+See if every vertex point in the object is part of at least 3 different faces
+
+@param obj - dictionary object with the points and faces for a 3d object
+@returns boolean false if problem seen with the vertex references
+"""
+def checkVertexesOfFaces ( obj ):
     allGood = True
     reportedSome = False
 
-    # print ( 'all edges shape: {0}'.format ( edges.shape )) # DEBUG
-    # print ( 'all edges shape: {0}, content:\n{1}'.format (
-    #     edges.shape, edges )) # DEBUG
+    vertextIndexes = np.reshape ( obj [ 'faces' ], -1 ).tolist() # no count in np.array
+    vertexReferences = [ vertextIndexes.count ( idx )
+        for idx in np.arange ( 0, len ( obj [ 'points' ]))]
 
-    # Edge endpoint references
-    edgeEndpointindexes = np.reshape ( edges, -1 ).tolist()
-    # print ( 'edges endpoint count = {0}; content:\n{1}'.format (
-    #     len ( edgeEndpointindexes ), edgeEndpointindexes )) # DEBUG
-
-    # number of reference to each vertex (in points)
-    vertexReferences = [ edgeEndpointindexes.count ( idx )
-        for idx in np.arange ( 0, pntCnt )]
-    # print ( 'vertex counts: {0}'.format ( vertexReferences )) # DEBUG
     if ( cmdLineArgs.verbose ):
         print ( 'Each face vertex is used from {0} to {1} times'.format (
             min ( vertexReferences ), max ( vertexReferences )))
         reportedSome = True
+
     if ( min ( vertexReferences ) < 3 ):
         allGood = False
-        # Need at least 3 references to every vertex of a triangle mesh
-        # to have a manifold surface
-        print ( 'Not enough face vertex reference to close the surface' )
+        # Need at least 3 references to every vertex of a triangle mesh to have
+        # a closed surface
+        print ( 'Not enough face vertex references to close the surface' )
         reportedSome = True
+        if ( min ( vertexReferences ) < 1 ): # orphan vertexes
+            print ( 'Some vertexes are not used for any face' )
 
     # IDEA TODO make sure no vertex (index) is referenced more than once per face
+    #   - each face must have 3 differnt vertex indexes
+
     if ( reportedSome ):
         print ( '' )
     return allGood
-# end checkEdgeEndpointUsage (…)
+# end checkVertexesOfFaces (…)
 
 
 """checkEdgeReuse ( edges )
@@ -657,7 +696,6 @@ def main ():
     if ( cmdLineArgs.verbose ):
         print ( '\nstl2scad converter version %s' % STL2SCAD_VERSION )
     for f in cmdLineArgs.file:
-        # print ( '\nnew file: |%s|' % f.name ) # DEBUG TRACE
         processStlFile ( f )
 # end main (…)
 
@@ -693,6 +731,12 @@ def getCmdLineArgs ():
     parser.add_argument ( '-i', '--indent',
         default = '\t',
         help = 'line prefix string to use for each level of nested indenting' )
+    parser.add_argument ( '-a', '--analyze',
+        action = 'store_true',
+        help = 'analyze the stl data for problems' )
+    parser.add_argument ( '-s', '--split',
+        action = 'store_true',
+        help = 'output separate modules for each disjoint surface' )
     parser.add_argument ( '-V', '--verbose',
         # IDEA TODO change to numeric verbosity; change to count instances
         # nargs = 0,
@@ -799,7 +843,7 @@ http://numpy-stl.readthedocs.io/en/latest/stl.html#module-stl.base ¦ Variables
 msh = mesh.Mesh.from_file( f.name )
  - len ( msh ) == grep --count "facet " test01.stl
 msh.name - string name of solid from (ascii) stl file
-msh.data - np.array of facet tupples (normal, facet, attr)
+msh.data - np.array of facet tuples (normal, facet, attr)
  - msh.data[n][0] == msh.normals[n]
  - msh.data[n][1] == msh.vectors[n]
  - msh.data[n][2] == msh.attr[n]
@@ -834,18 +878,19 @@ msh.speedups - boolean ?internal? flag used during load attempts, switching
 """
 def showMeshInfo( msh ):
     vol, cog, inertia = msh.get_mass_properties()
-    print ( '\nSTL Mesh properties:\n' )
-    print ( 'Name = "{0}"'.format ( msh.name ))
-    print ( 'Volume = {0}'.format ( vol ))
-    print ( 'Facets: %d' % len ( msh ))
-    print ( 'Position of the center of gravity (COG):\n{0}'.format ( cog ))
-    print ( 'Inertia matrix expressed at the COG:\n{0}'.format ( inertia ))
-
-    # print ( msh.x.shape ) # DEBUG
     boundingBox = np.array ([
         [ min ( np.reshape ( msh.x, -1 )), min ( np.reshape ( msh.y, -1 )), min ( np.reshape ( msh.z, -1 ))],
         [ max ( np.reshape ( msh.x, -1 )), max ( np.reshape ( msh.y, -1 )), max ( np.reshape ( msh.z, -1 ))]])
-    print ( 'Bounding Box:\n{0}'.format( boundingBox ))
+    print ( '\nSTL Mesh properties:\n'
+        '\nName = "{0}"'
+        '\nVolume = {1}'
+        '\n{2} Facets, {3} Vertexes'
+        '\nPosition of the center of gravity (COG):\n{4}'
+        '\nInertia matrix expressed at the COG:\n{5}'
+        '\nBounding Box:\n{6}'
+        ''.format ( msh.name, vol, len ( msh ), 3 * len ( msh.v0 ), cog,
+        inertia, boundingBox ))
+
     if ( min ( boundingBox [ 0 ]) <= 0 ):
         print ( '\nNOTE: Not a standard STL source file;\n'
             '  not all points are in the positive quadrant\n' )
