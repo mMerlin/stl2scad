@@ -3,7 +3,7 @@
 Convert .stl file to OpenSCAD .scad
 
 ## Usage
-stl2scad [-h] [-v] [file]…
+stl2scad [-h] [-v] [-s] [-a] [-V] [-C«version»] [-i«string»] [file]…
 
 ## Attribution
 

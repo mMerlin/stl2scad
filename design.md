@@ -3,6 +3,9 @@
 Initial reference information
 * https://github.com/joshuaflanagan/stl2scad
 
+My current repository
+* https://github.com/mMerlin/stl2scad
+
 ## Goals
 
 Create as many separate objects / (closed) surfaces as possible from each input stl file, without changing the set of vertex points, or adding or removing any facets.  That is, create a separate scad object from each disjoint surface in each stl file.
@@ -208,7 +211,8 @@ https://virtualenv.pypa.io/en/
 
 Need a sample stl file with separate objects connected at a single edge
 
-IDEA remove test stl file(s) from repository that are generated programatically
+IDEA remove test stl file(s) from repository that are generated programmatically (ie export from OpenScad)
+- that would rely on other versions of OpenScad creating the same content
 
 NOTE: Remember to post a note to https://w.wol.ph/ ¦ Rick van Hattem ¦ https://github.com/WoLpH/numpy-stl/ when have a usable / public version of stl2scad
 
