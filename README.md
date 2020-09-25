@@ -37,7 +37,7 @@ rm OpenSCAD_Model.scad
 OpenSCAD OpenSCAD_Model.scad
 ```
 
-`test01.scad` is used to verify that OpenSCAD is installed and working. It creates and displays a couple of tetrahedron objects. `test01.stl` contains the stl equivalent of the tetrahedron objects. The 2 openstl command lines creates the OpenSCAD polyhedron objects from that, either as a single file, or as disjoint objects with a wrapper to to display them. The generated file needs to be deleted (or renamed) before the second run, because stl2scad is configured to refuse to overwrite an existing file.
+`test01.scad` is used to verify that OpenSCAD is installed and working. It creates and displays a couple of tetrahedron objects. `test01.stl` contains the stl equivalent of the tetrahedron objects. The 2 other `OpenSCAD` command lines create the OpenSCAD polyhedron objects from that, either as a single file, or as disjoint objects with a wrapper to display them. The generated file needs to be deleted (or renamed) before the second run, because stl2scad is configured to refuse to overwrite an existing file.
 
 ## Attribution
 
